@@ -1,1457 +1,520 @@
-# R2G: Multi-View Circuit Graph Benchmark Suite
+# R2G: A Multi-View Circuit Graph Benchmark Suite from RTL to GDSII
 
-## Data Generation Pipeline Guide for CVPR 2026 Reproduction
+[![CVPR 2026](https://img.shields.io/badge/CVPR-2026-blue)](https://cvf.openaccess.thewebconference.com/content/CVPR2026)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Team Repository](https://img.shields.io/badge/Team%20Repository-ShenShan123%2FR2G-orange)](https://github.com/ShenShan123/R2G)
+
+> **Note:** This repository ([David123ZHOU/R2G](https://github.com/David123ZHOU/R2G)) is maintained by **ZEWEI ZHOU (David123ZHOU)**, one of the authors of the R2G project. It is synchronized from the team repository at **[ShenShan123/R2G](https://github.com/ShenShan123/R2G)** and contains the complete project work. For the canonical team repository, please visit [https://github.com/ShenShan123/R2G](https://github.com/ShenShan123/R2G).
+
+---
+
+R2G is a standardized benchmark and framework that converts DEF files into typed, heterogeneous, information-preserving circuit graphs and supports node- and edge-level tasks in placement and routing. It distinguishes itself by:
+
+- **Multi-View Representations**: 5 stage-aware views with information parity
+- **Typed Heterogeneity**: Distinguishes different node/edge types (gates, nets, pins, IOs)
+- **Stage-Aware Supervision**: Supports placement (HPWL) and routing (wire_length, via_count) tasks
+- **Standardized Splits**: Unified train/val/test splits across designs
+
+This enables fair cross-view comparison and isolates representation from modeling for EDA machine learning.
+
+---
+
+## Key Features
+
+- **DEF to Graph Conversion**: Converts physical design files into standardized multi-view circuit graphs
+- **PyTorch Geometric Integration**: Full support for PyTorch Geometric data format
+- **Multiple GNN Architectures**: GINE, GAT, ResGatedGCN implementations
+- **Performance Metrics Analysis**: Evaluates HPWL for placement, wire length and via count for routing
+- **Extensible Design**: Active development with plans for additional tasks and models
 
 ---
 
 ## Table of Contents
 
-1. [Data Generation Overview](#data-generation-overview)
-2. [Quick Start](#quick-start)
-3. [Pipeline Architecture](#pipeline-architecture)
-4. [DEF File Format & Parsing](#def-file-format--parsing)
-5. [Graph Generation Modules](#graph-generation-modules)
-6. [View Construction](#view-construction)
-7. [Graph Merging](#graph-merging)
-8. [Data Export](#data-export)
-9. [Troubleshooting](#troubleshooting)
-10. [Advanced Usage](#advanced-usage)
+- [Overview](#overview)
+- [Installation](#installation)
+- [Usage Examples](#usage-examples)
+- [Project Structure](#project-structure)
+- [Data Generation Pipeline](#data-generation-pipeline)
+- [Training & Evaluation](#training--evaluation)
+- [Citation](#citation)
 
 ---
 
-## Data Generation Overview
+## Overview
 
-### What is the Data Generation Pipeline?
+### What is R2G?
 
-The R2G data generation pipeline converts physical design files (DEF) from the OpenROAD EDA flow into standardized multi-view circuit graphs suitable for graph neural network training. This is the **upstream pipeline** that prepares the dataset used in the downstream training phase.
+R2G converts physical design files (DEF) from the OpenROAD EDA flow into standardized multi-view circuit graphs suitable for graph neural network training. The benchmark suite consists of two phases:
 
-### Why Separate Pipelines?
+- **Phase 1 (Data Generation)**: DEF → Multi-view Graphs → Merged Homographs → .pt files
+- **Phase 2 (Model Training)**: .pt files → GNN Training → Model Evaluation
 
-The R2G project is divided into two phases:
+### Design Corpus
 
-- **Phase 1 (This Pipeline)**: DEF → Multi-view Graphs → Merged Homographs → .pt files
-- **Phase 2 (Training Pipeline)**: .pt files → GNN Training → Model Evaluation
+R2G is built on open-source IP cores from OpenCores and GitHub, spanning multiple categories:
 
-Separating data generation from training provides:
+| Category | Examples | Characteristics |
+|----------|----------|-----------------|
+| **Video/Audio** | vga_lcd, ac97_ctrl | Structured dataflow with moderate pin counts |
+| **Communication** | uart, spi, pci, usb | Protocol-centric controllers with high external connectivity |
+| **Crypto** | des3, aes, sha256 | Dense combinational logic with pipeline stages |
+| **DSP** | fir, jpeg, idft | Arithmetic throughput and wide datapaths |
+| **Processors** | tv80, riscv32i, ibex, swerv | Largest scales with mixed control–datapath structure |
 
-1. **Reproducibility**: Dataset can be generated once and reused
-2. **Flexibility**: Multiple models can train on the same data
-3. **Efficiency**: Avoid re-parsing large DEF files for each experiment
-4. **Portability**: Dataset can be shared without raw DEF files
+**Scale Statistics** (representative designs):
+- **Gates**: 463 to 158,629 cells
+- **Nets**: 521 to 178,202 connections
+- **IOs**: 28 to 2,546 pins
 
-### Core Data Generation Tasks
+### Why R2G?
 
-| Stage                      | Input           | Output              | Purpose                                  |
-| -------------------------- | --------------- | ------------------- | ---------------------------------------- |
-| **DEF Parsing**            | .def files      | Component data      | Extract gates, nets, pins, IOs, geometry |
-| **Heterograph Generation** | Parsed DEF      | Typed graphs (B-F)  | Build multi-view heterographs            |
-| **Homograph Conversion**   | Heterographs    | Unified graphs      | Normalize node/edge types                |
-| **Graph Merging**          | Multiple graphs | Single merged graph | Aggregate graphs across designs          |
-| **Data Export**            | Merged graphs   | .pt files           | PyTorch-compatible format                |
+![Dataset evolution across graph ML and EDA](figs/prefect_intro.png)
 
-### Pipeline Key Features
+Current graph ML benchmarks (OGB, TUDataset) are domain-agnostic and don't capture EDA-specific semantics:
+- **Typed heterogeneity**: Different node/edge types (gates, nets, pins, IOs)
+- **Multi-terminal connectivity**: Nets connect multiple pins
+- **Geometry-aware attributes**: Coordinates, layers, areas
+- **Stage-aware supervision**: Different labels at different design stages
 
-- **Multi-view support**: Generates 5 different graph representations (views B-F)
-- **Stage awareness**: Separate pipelines for placement and routing
-- **Type preservation**: Maintains EDA-specific node/edge semantics
-- **Scalability**: Handles designs with millions of elements
-- **Standardization**: Consistent format across all designs
+R2G fills this gap by providing a stage-aware, multi-view circuit-graph benchmark suite at the intersection of graph ML and EDA, as shown above.
 
 ---
 
-## Quick Start
+## Installation
 
-### Prerequisites
-
-```bash
-# Python dependencies
-pip install torch torchvision
-pip install numpy pandas
-pip install tqdm
-
-# EDA dependencies (for DEF parsing)
-# Note: DEF files should be pre-generated by OpenROAD flow
-```
-
-### Directory Structure
-
-```
-R2G/                              # Root directory
-├── EDA_Data_Extractor.py         # EDA data extraction tool
-├── R2G_DATA_GENERATION_GUIDE.md # This guide
-├── data_pipeline/                # Data processing pipeline
-│   ├── heterograph_generation/   # Heterograph generation
-│   │   ├── placement_v1.4/       # Placement heterographs
-│   │   │   ├── B_heterograph_generator.py     # View B: All elements as nodes
-│   │   │   ├── C_heterograph_generator.py     # View C: Pins as edges
-│   │   │   ├── D_heterograph_generator.py     # View D: Nets as edges
-│   │   │   ├── E_heterograph_generator.py     # View E: Incidence edges
-│   │   │   └── F_heterograph_generator.py     # View F: Nets without pins
-│   │   └── routing_v1.3/        # Routing heterographs
-│   │       ├── RB_heterograph_generator.py   # View B (routing)
-│   │       ├── RC_heterograph_generator.py   # View C (routing)
-│   │       ├── RD_heterograph_generator.py   # View D (routing)
-│   │       ├── RE_heterograph_generator.py   # View E (routing)
-│   │       └── RF_heterograph_generator.py   # View F (routing)
-│   ├── homograph_conversion/    # Homograph conversion
-│   │   ├── placement_v1.4/       # Placement homographs
-│   │   │   └── place_hetero_to_homo_converter.py
-│   │   └── routing_v1.3/        # Routing homographs
-│   │       └── route_hetero_to_homo_converter.py
-│   ├── graph_merging/           # Graph merging
-│   │   ├── placement_homo/      # Placement homograph merging
-│   │   │   ├── instruction.txt               # Merging instructions
-│   │   │   ├── node_merge_homographs.py
-│   │   │   └── edge_merge_homographs.py
-│   │   ├── placement_hetero/   # Placement heterograph merging
-│   │   │   ├── instruction.txt               # Merging instructions
-│   │   │   ├── node_merge_heterographs.py
-│   │   │   └── edge_merge_heterographs.py
-│   │   ├── routing_homo/      # Routing homograph merging
-│   │   │   ├── instruction.txt               # Merging instructions
-│   │   │   ├── node_merge_homographs.py
-│   │   │   └── edge_merge_homographs.py
-│   │   └── routing_hetero/   # Routing heterograph merging
-│   │       ├── instruction.txt               # Merging instructions
-│   │       ├── node_merge_heterographs.py
-│   │       └── edge_merge_heterographs.py
-│   └── graph_validation/        # Graph validation
-│       ├── check_heterograph.py
-│       ├── check_homographs.py
-│       └── compare_graphs.py
-└── data_sources/               # Data sources
-    ├── placement_def/          # Placement DEF files
-    ├── routing_def/            # Routing DEF files
-    └── source_code/           # Source code
-```
-
-### Minimal Working Example
+Create a conda environment and install dependencies:
 
 ```bash
-# Step 1: Place your DEF files in data/raw_def/
-#    Format: data/raw_def/<design_name>/floorplan.def
+# Create conda environment
+conda create -n gnn_env python=3.10 -y
+conda activate gnn_env
 
-# Step 2: Generate heterographs for a specific view (placement, view B)
+# Install PyTorch with CUDA 12.1 support
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# Install PyTorch Geometric
+pip install torch-geometric
+pip install pyg-lib torch-scatter torch-sparse torch-cluster torch-spline-conv -f https://data.pyg.org/whl/torch-2.5.0+cu121.html
+
+# Install other dependencies
+pip install -r requirements.txt
+```
+
+**Note**: CUDA 12.1 is recommended for GPU acceleration. Verify with `nvidia-smi`.
+
+---
+
+## Usage Examples
+
+### 0. Environment Setup
+
+Ensure CUDA 11.0+ is installed. Verify with `nvidia-smi`.
+
+### 1. Data Generation Pipeline
+
+**Step 1: Prepare DEF Files**
+
+Place your DEF files in the appropriate directories:
+- Placement DEF files: `data_sources/placement_def/<design_name>/floorplan.def`
+- Routing DEF files: `data_sources/routing_def/<design_name>/floorplan.def`
+
+The generation modules for different graph views are located at `data_pipeline/heterograph_generation/`.
+
+**Step 2: Generate Heterographs**
+
+Generate heterographs for a specific view (View B - recommended for best performance):
+
+```bash
+# Placement task, View B
 python data_pipeline/heterograph_generation/placement_v1.4/B_heterograph_generator.py \
     --input_dir data_sources/placement_def \
     --output_dir data/heterographs/place
 
-# Step 3: Convert heterographs to homographs
+# Routing task, View B
+python data_pipeline/heterograph_generation/routing_v1.3/RB_heterograph_generator.py \
+    --input_dir data_sources/routing_def \
+    --output_dir data/heterographs/route
+```
+
+**Step 3: Convert to Homographs**
+
+```bash
+# Placement
 python data_pipeline/homograph_conversion/placement_v1.4/place_hetero_to_homo_converter.py \
     --input_dir data/heterographs/place \
     --output_dir data/homographs/place
 
-# Step 4: Merge homographs from all designs
+# Routing
+python data_pipeline/homograph_conversion/routing_v1.3/route_hetero_to_homo_converter.py \
+    --input_dir data/heterographs/route \
+    --output_dir data/homographs/route
+```
+
+**Step 4: Merge Homographs**
+
+Merge graphs from multiple designs into a single training dataset:
+
+```bash
+# Placement - merge nodes first, then edges
 python data_pipeline/graph_merging/placement_homo/node_merge_homographs.py \
     --input_dir data/homographs/place \
     --output_file data/merged/place_B_homograph.pt
 
-# Step 5: Merge edge labels
 python data_pipeline/graph_merging/placement_homo/edge_merge_homographs.py \
     --input_dir data/homographs/place \
     --output_file data/merged/place_B_homograph.pt
 
-# Result: data/merged/place_B_homograph.pt is ready for training!
+# Routing
+python data_pipeline/graph_merging/routing_homo/node_merge_homographs.py \
+    --input_dir data/homographs/route \
+    --output_file data/merged/route_B_homograph.pt
+
+python data_pipeline/graph_merging/routing_homo/edge_merge_homographs.py \
+    --input_dir data/homographs/route \
+    --output_file data/merged/route_B_homograph.pt
 ```
 
-### Complete Pipeline Script
+**Results**: The merged `.pt` files contain complete datasets ready for GNN training.
+
+### 2. Model Training
+
+**Node-Level Task Example (Placement HPWL Prediction)**
+
+Navigate to the training directory and run:
 
 ```bash
-# Generate all placement views
-for view in B C D E F; do
-    python data_pipeline/heterograph_generation/placement_v1.4/${view}_heterograph_generator.py \
-        --input_dir data_sources/placement_def \
-        --output_dir data/heterographs/place
-    
-    python data_pipeline/homograph_conversion/placement_v1.4/place_hetero_to_homo_converter.py \
-        --input_dir data/heterographs/place \
-        --output_dir data/homographs/place
-    
-    python data_pipeline/graph_merging/placement_homo/node_merge_homographs.py \
-        --input_dir data/homographs/place \
-        --output_file data/merged/place_${view}_homograph.pt
-    
-    python data_pipeline/graph_merging/placement_homo/edge_merge_homographs.py \
-        --input_dir data/homographs/place \
-        --output_file data/merged/place_${view}_homograph.pt
-done
+cd gnn-node
+
+# Best configuration (R² > 0.99)
+python main.py \
+    --dataset place_B_homograph \
+    --task_level node \
+    --task regression \
+    --model gine \
+    --num_gnn_layers 4 \
+    --num_head_layers 4 \
+    --hid_dim 256 \
+    --lr 0.0001 \
+    --lr_scheduler plateau \
+    --epochs 100 \
+    --gpu 0 \
+    --fixed_test_ids "2,9,21,27,28" \
+    --fixed_val_ids "5,14,1,24,26"
 ```
 
----
-
-## Pipeline Architecture
-
-### High-Level Pipeline Flow
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│              Data Generation Pipeline                        │
-└─────────────────────────────────────────────────────────────┘
-                          │
-                          ↓
-┌─────────────────────────────────────────────────────────────┐
-│  1. DEF File Collection                                     │
-│     └─ Collect floorplan.def from OpenROAD outputs         │
-│        Format: data/raw_def/<design>/floorplan.def          │
-└─────────────────────────────────────────────────────────────┘
-                          │
-                          ↓
-┌─────────────────────────────────────────────────────────────┐
-│  2. Heterograph Generation (View-Specific)                  │
-│     ┌─────────────────────────────────────────┐             │
-│     │  For each view (A, B, C, D, E, F):      │             │
-│     │                                         │             │
-│     │  A. Parse DEF:                          │             │
-│     │     - Extract components (gates, nets, │             │
-│     │       pins, IOs)                        │             │
-│     │     - Extract geometry (coordinates,   │             │
-│     │       layers, areas)                    │             │
-│     │     - Extract connectivity (nets, pins)│             │
-│     │                                         │             │
-│     │  B. Build graph structure:              │             │
-│     │     - Create nodes (type-specific)     │             │
-│     │     - Create edges (type-specific)     │             │
-│     │     - Compute node features            │             │
-│     │     - Compute edge features            │             │
-│     │                                         │             │
-│     │  C. Compute labels:                    │             │
-│     │     - Placement: HPWL for nets          │             │
-│     │     - Routing: wire_length, via_count  │             │
-│     │                                         │             │
-│     │  D. Save heterograph:                  │             │
-│     │     - PyTorch .pt file                 │             │
-│     └──────────────────┬──────────────────────┘             │
-│                        ↓                                     │
-│     data/heterographs/place/<design>_<view>_heterograph.pt │
-└─────────────────────────────────────────────────────────────┘
-                          │
-                          ↓
-┌─────────────────────────────────────────────────────────────┐
-│  3. Homograph Conversion                                    │
-│     ┌─────────────────────────────────────────┐             │
-│     │  Normalize node types:                  │             │
-│     │  - gate (0), io_pin (1), net (2),       │             │
-│     │    pin (3)                              │             │
-│     │                                         │             │
-│     │  Normalize edge types:                  │             │
-│     │  - gate_gate (0) → gate_gate (0)        │             │
-│     │  - gate_net (1) → gate_net (1)         │             │
-│     │  - ... (9 total types)                 │             │
-│     │                                         │             │
-│     │  Ensure feature consistency:           │             │
-│     │  - Same dimensions across all graphs    │             │
-│     │  - Same feature ordering               │             │
-│     └──────────────────┬──────────────────────┘             │
-│                        ↓                                     │
-│     data/homographs/place/<design>_<view>_homograph.pt      │
-└─────────────────────────────────────────────────────────────┘
-                          │
-                          ↓
-┌─────────────────────────────────────────────────────────────┐
-│  4. Graph Merging                                           │
-│     ┌─────────────────────────────────────────┐             │
-│     │  Node merging:                          │             │
-│     │  - Concatenate all node features        │             │
-│     │  - Assign graph_id to each node         │             │
-│     │  - Accumulate global features           │             │
-│     │                                         │             │
-│     │  Edge merging:                          │             │
-│     │  - Concatenate all edge features        │             │
-│     │  - Update edge_index offsets            │             │
-│     │  - Merge edge labels                    │             │
-│     │                                         │             │
-│     │  Global features:                      │             │
-│     │  - Design-level statistics             │             │
-│     │  - Die coordinates                     │             │
-│     │  - Technology parameters               │             │
-│     └──────────────────┬──────────────────────┘             │
-│                        ↓                                     │
-│     data/merged/<task>_<view>_homograph.pt                  │
-└─────────────────────────────────────────────────────────────┘
-                          │
-                          ↓
-┌─────────────────────────────────────────────────────────────┐
-│  5. Data Verification                                        │
-│     ┌─────────────────────────────────────────┐             │
-│     │  Check feature consistency             │             │
-│     │  Check label coverage                   │             │
-│     │  Check graph connectivity               │             │
-│     │  Generate statistics report             │             │
-│     └─────────────────────────────────────────┘             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Data Flow Diagram
-
-```
-Raw DEF Files (OpenROAD)
-         │
-         ├─┬─ design1/floorplan.def
-         ├─┼─ design2/floorplan.def
-         └─┴─ design3/floorplan.def
-         │
-         ↓ (Parsing + Feature Extraction)
-         │
-    Heterographs (Typed)
-         │
-         ├─ design1_B_heterograph.pt  ──┐
-         ├─ design2_B_heterograph.pt  ──┼─ View B
-         ├─ design3_B_heterograph.pt  ──┘
-         │
-         ├─ design1_C_heterograph.pt  ──┐
-         ├─ design2_C_heterograph.pt  ──┼─ View C
-         └─ design3_C_heterograph.pt  ──┘
-         │
-         ↓ (Type Normalization)
-         │
-    Homographs (Unified)
-         │
-         ├─ design1_B_homograph.pt    ──┐
-         ├─ design2_B_homograph.pt    ──┼─ View B
-         └─ design3_B_homograph.pt    ──┘
-         │
-         ↓ (Graph Merging)
-         │
-    Merged Homographs
-         │
-         └─ place_B_homograph.pt       (Single file for all designs)
-         └─ place_C_homograph.pt
-         └─ route_B_homograph.pt
-         │
-         ↓ (Ready for Training)
-         │
-    Training Pipeline → .pt files → GNN Models
-```
-
----
-
-## DEF File Format & Parsing
-
-### What is a DEF File?
-
-DEF (Design Exchange Format) is a standard file format used in EDA to represent the physical layout of an integrated circuit. It contains:
-
-- **Components**: Gates, macros, and standard cells
-- **Nets**: Electrical connections between components
-- **Pins**: Connection points on components
-- **IO Ports**: Top-level input/output pins
-- **Geometry**: Physical coordinates, layers, and areas
-- **Routing**: Wire segments and vias (for post-routing DEF)
-
-### DEF File Structure
-
-```def
-VERSION 5.8 ;
-DESIGN aes_core ;
-
-DIVIDERCHAR "/" ;
-BUSBITCHARS "[]" ;
-
-UNITS DISTANCE MICRONS 1000 ;
-
-DIEAREA ( 0 0 ) ( 1000000 1000000 ) ;
-
-# Component Section
-COMPONENTS 12345 ;
-- _347_ XOR2_X1 + PLACED ( 123456 789012 ) N ;
-- _348_ NAND2_X1 + PLACED ( 234567 890123 ) FS ;
-END COMPONENTS
-
-# Pins Section
-PINS 100 ;
-- input_1 + NET input_net + DIRECTION INPUT + PLACED ( 5000 10000 ) N ;
-- output_1 + NET output_net + DIRECTION OUTPUT + PLACED ( 995000 990000 ) FS ;
-END PINS
-
-# Nets Section
-NETS 5000 ;
-- input_net ( input_1 _347_ A ) ;
-- net_12345 ( _347_ Y _348_ A0 _349_ B ) ;
-END NETS
-
-# Special Nets Section (for routing)
-SPECIALNETS 100 ;
-- VDD ( _100_ VDD _101_ VDD ) + ROUTED M1 ( 0 0 ) ( 1000000 0 ) ;
-- GND ( _102_ GND _103_ GND ) + ROUTED M2 ( 0 0 ) ( 0 1000000 ) ;
-END SPECIALNETS
-END DESIGN
-```
-
-### Key DEF Components
-
-#### 1. Components (Gates)
-
-```python
-# Example: _347_ XOR2_X1 + PLACED ( 123456 789012 ) N ;
-{
-    'name': '_347_',
-    'cell_type': 'XOR2_X1',  # Gate type
-    'x': 123456,              # X coordinate (in microns/1000)
-    'y': 789012,              # Y coordinate
-    'orientation': 'N',       # N, S, E, W, FN, FS, FE, FW
-    'status': 'PLACED'        # PLACED, FIXED, UNPLACED
-}
-```
-
-#### 2. Pins (Gate Pins)
-
-```python
-# Each component has pins (e.g., A, B, Y for XOR2)
-{
-    'gate_name': '_347_',
-    'pin_name': 'A',
-    'pin_type': 'input',
-    'coordinates': (relative to gate origin)
-}
-```
-
-#### 3. IO Ports
-
-```python
-# Example: input_1 + NET input_net + DIRECTION INPUT
-{
-    'name': 'input_1',
-    'net_name': 'input_net',
-    'direction': 'INPUT',    # INPUT or OUTPUT
-    'x': 5000,
-    'y': 10000
-}
-```
-
-#### 4. Nets
-
-```python
-# Example: net_12345 ( _347_ Y _348_ A0 _349_ B )
-{
-    'name': 'net_12345',
-    'connections': [
-        ('_347_', 'Y'),      # Gate _347_, pin Y
-        ('_348_', 'A0'),     # Gate _348_, pin A0
-        ('_349_', 'B')       # Gate _349_, pin B
-    ],
-    'type': 'signal'         # signal, power, ground, clock
-}
-```
-
-#### 5. Die Area
-
-```python
-# DIEAREA ( 0 0 ) ( 1000000 1000000 )
-{
-    'x_min': 0,
-    'y_min': 0,
-    'x_max': 1000000,  # 1000 microns
-    'y_max': 1000000   # 1000 microns
-}
-```
-
-### DEF Parsing Implementation
-
-```python
-def parse_def_file(def_path):
-    """
-    Parse DEF file and extract components, nets, pins, IOs
-    
-    Returns:
-        components: List of gates/cells
-        nets: List of electrical connections
-        io_pins: List of top-level I/O ports
-        die_area: Die boundary coordinates
-    """
-    components = []
-    nets = []
-    io_pins = []
-    die_area = None
-    
-    with open(def_path, 'r') as f:
-        content = f.read()
-    
-    # Parse DIEAREA
-    die_area_match = re.search(r'DIEAREA\s*\(\s*(\d+)\s+(\d+)\s*\)\s*\(\s*(\d+)\s+(\d+)\s*\)', content)
-    if die_area_match:
-        die_area = {
-            'x_min': int(die_area_match.group(1)),
-            'y_min': int(die_area_match.group(2)),
-            'x_max': int(die_area_match.group(3)),
-            'y_max': int(die_area_match.group(4))
-        }
-    
-    # Parse COMPONENTS
-    components_section = extract_section(content, 'COMPONENTS', 'END COMPONENTS')
-    for line in components_section:
-        # Format: - name cell_type + PLACED ( x y ) orientation ;
-        match = re.match(r'-\s+(\S+)\s+(\S+)\s*\+\s*PLACED\s*\(\s*(\d+)\s+(\d+)\s*\)\s*(\w+)\s*;', line)
-        if match:
-            components.append({
-                'name': match.group(1),
-                'cell_type': match.group(2),
-                'x': int(match.group(3)),
-                'y': int(match.group(4)),
-                'orientation': match.group(5)
-            })
-    
-    # Parse NETS
-    nets_section = extract_section(content, 'NETS', 'END NETS')
-    for line in nets_section:
-        # Format: - net_name ( pin1 pin2 ... ) ;
-        match = re.match(r'-\s+(\S+)\s*\((.*?)\)\s*;', line)
-        if match:
-            net_name = match.group(1)
-            connections = match.group(2).split()
-            nets.append({
-                'name': net_name,
-                'connections': connections
-            })
-    
-    # Parse PINS (IO ports)
-    pins_section = extract_section(content, 'PINS', 'END PINS')
-    for line in pins_section:
-        # Format: - pin_name + NET net_name + DIRECTION dir + PLACED ( x y ) ori ;
-        match = re.match(r'-\s+(\S+)\s*\+\s*NET\s+(\S+)\s*\+\s*DIRECTION\s+(\S+)\s*\+\s*PLACED\s*\(\s*(\d+)\s+(\d+)\s*\)\s*(\w+)\s*;', line)
-        if match:
-            io_pins.append({
-                'name': match.group(1),
-                'net_name': match.group(2),
-                'direction': match.group(3),
-                'x': int(match.group(4)),
-                'y': int(match.group(5)),
-                'orientation': match.group(6)
-            })
-    
-    return components, nets, io_pins, die_area
-```
-
----
-
-## Graph Generation Modules
-
-### Module 1: Heterograph Generator
-
-**Purpose**: Convert parsed DEF data into typed graph representations
-
-**Location**: `data_pipeline/heterograph_generation/`
-
-**Key Files**:
-
-**Placement Views (`placement_v1.4/`)**:
-
-- `B_heterograph_generator.py` - View B: All elements as nodes
-- `C_heterograph_generator.py` - View C: Pins as edges
-- `D_heterograph_generator.py` - View D: Nets as edges
-- `E_heterograph_generator.py` - View E: Incidence edges
-- `F_heterograph_generator.py` - View F: Nets without pins
-
-**Routing Views (`routing_v1.3/`)**:
-
-- `RB_heterograph_generator.py` - View B (routing)
-- `RC_heterograph_generator.py` - View C (routing)
-- `RD_heterograph_generator.py` - View D (routing)
-- `RE_heterograph_generator.py` - View E (routing)
-- `RF_heterograph_generator.py` - View F (routing)
-
-### Heterograph Structure
-
-Each heterograph contains:
-
-```python
-{
-    # Node features
-    'x': Tensor[N, node_feat_dim],     # Node features
-    'y': Tensor[N],                   # Node labels
-    'node_type': Tensor[N],           # Node type (0-3)
-    
-    # Edge features
-    'edge_index': Tensor[2, E],       # Edge connectivity
-    'edge_attr': Tensor[E, edge_feat_dim],  # Edge features
-    'edge_type': Tensor[E],          # Edge type (0-8)
-    
-    # Global features
-    'global_features': Tensor[G, 6],  # Global features per graph
-    'global_y': Tensor[G, 4],        # Global labels
-    'die_coordinates': Tensor[G, 2, 2]  # Die bounds
-}
-```
-
-### Node Types
-
-| Type   | ID   | Description                              |
-| ------ | ---- | ---------------------------------------- |
-| gate   | 0    | Standard logic gate (AND, OR, XOR, etc.) |
-| io_pin | 1    | Top-level I/O port                       |
-| net    | 2    | Electrical network                       |
-| pin    | 3    | Pin of a gate (input/output pin)         |
-
-### Edge Types
-
-| Type         | ID   | Description                                   |
-| ------------ | ---- | --------------------------------------------- |
-| gate_gate    | 0    | Connection between two gates (via shared net) |
-| gate_net     | 1    | Connection between gate and net               |
-| gate_pin     | 2    | Connection between gate and its pin           |
-| io_pin_gate  | 3    | Connection between IO pin and gate            |
-| io_pin_net   | 4    | Connection between IO pin and net             |
-| io_pin_pin   | 5    | Connection between IO pin and gate pin        |
-| pin_net      | 6    | Connection between pin and net                |
-| pin_pin      | 7    | Connection between two pins (via shared net)  |
-| pin_gate_pin | 8    | Connection between pin and gate pin           |
-
-### View-Specific Generators
-
-#### View B: All Elements as Nodes ⭐
-
-**File**: `B_heterograph_generator.py`
-
-**Concept**: Most complete representation, all circuit elements as nodes
-
-**Graph Structure**:
-
-- Nodes: Gates + Nets + Pins + IO Pins
-- Edges: Gate-Pin, Pin-Net, Pin-Pin, Gate-Gate, IO-Pin-...
-
-**Use Case**: **Best overall performance** (recommended)
-
-**Key Features**:
-
-```python
-# Node features: [x, y, cell_type, orientation, area, place_flag, 
-#                 power_leak, io_x, io_y, graph_id, node_type]
-# Edge features: [9-dimensional vector]
-
-# Labels:
-# - Placement: HPWL (Half-Perimeter Wire Length) for nets
-# - Routing: wire_length, via_count for edges
-```
-
-#### View C: Pins as Edges
-
-**File**: `C_heterograph_generator.py`
-
-**Concept**: Flatten pin-net connectivity into direct gate-gate edges
-
-**Graph Structure**:
-
-- Nodes: Gates + Nets + IO Pins
-- Edges: Gate → Gate (via pins)
-
-**Use Case**: Simplified routing analysis
-
-#### View D: Nets as Edges
-
-**File**: `D_heterograph_generator.py`
-
-**Concept**: Represent nets as edges between gates
-
-**Graph Structure**:
-
-- Nodes: Gates + IO Pins
-- Edges: Gate ↔ Gate (net as edge)
-
-**Use Case**: Gate-level connectivity
-
-#### View E: Incidence Edges
-
-**File**: `E_heterograph_generator.py`
-
-**Concept**: Bipartite graph structure (gates ↔ nets)
-
-**Graph Structure**:
-
-- Nodes: Gates + Nets
-- Edges: Gate ↔ Net (incidence relationship)
-
-**Use Case**: Bipartite graph analysis
-
-#### View F: Nets Without Pins
-
-**File**: `F_heterograph_generator.py`
-
-**Concept**: Similar to View B but without pin nodes
-
-**Graph Structure**:
-
-- Nodes: Gates + Nets + IO Pins (no pins)
-- Edges: Gate ↔ Net, IO Pin ↔ Net
-
-**Use Case**: Reduced complexity representation
-
-### Feature Computation
-
-#### Node Features
-
-```python
-def compute_node_features(component, node_type, global_info):
-    """
-    Compute node features for a given component
-    
-    Args:
-        component: Parsed DEF component
-        node_type: 0=gate, 1=io_pin, 2=net, 3=pin
-        global_info: Global design information
-    
-    Returns:
-        features: Tensor[10] - [x, y, cell_type, orientation, area, 
-                              place_flag, power_leak, io_x, io_y, node_type]
-    """
-    if node_type == 0:  # Gate
-        features = [
-            component['x'],
-            component['y'],
-            component['cell_type'],      # Discrete (96 classes)
-            component['orientation'],    # Discrete (8 classes)
-            compute_area(component['cell_type']),  # Continuous
-            1 if component['status'] == 'PLACED' else 0,  # Binary
-            compute_power_leak(component['cell_type']),  # Continuous
-            0, 0,                       # IO coordinates (N/A)
-            node_type
-        ]
-    
-    elif node_type == 1:  # IO Pin
-        features = [
-            component['x'],
-            component['y'],
-            0, 0, 0, 0, 0,           # Gate-specific features (N/A)
-            0, 0,                     # IO coordinates (same as position)
-            node_type
-        ]
-    
-    elif node_type == 2:  # Net
-        features = [
-            0, 0,                     # Coordinates (N/A)
-            get_net_type(component),  # Discrete
-            0, 0, 0, 0, 0,           # Other features (N/A)
-            0, 0,                     # IO coordinates (N/A)
-            node_type
-        ]
-    
-    elif node_type == 3:  # Pin
-        features = [
-            pin['x'],
-            pin['y'],
-            get_pin_type(pin),        # Discrete
-            0,                         # Orientation (N/A)
-            0, 0, 0, 0, 0,            # Other features (N/A)
-            node_type
-        ]
-    
-    return torch.tensor(features, dtype=torch.float)
-```
-
-#### Edge Features
-
-```python
-def compute_edge_features(edge_type, src_node, dst_node, global_info):
-    """
-    Compute edge features for a given edge
-    
-    Returns:
-        features: Tensor[9] - Edge-specific features
-    """
-    if edge_type == 0:  # gate_gate
-        features = [
-            compute_distance(src_node, dst_node),
-            compute_manhattan_distance(src_node, dst_node),
-            # ... 7 more features
-        ]
-    
-    elif edge_type == 1:  # gate_net
-        features = [
-            src_node['cell_type'],
-            dst_node['net_type'],
-            compute_pin_count(dst_node),
-            # ... 6 more features
-        ]
-    
-    # ... other edge types
-    
-    return torch.tensor(features, dtype=torch.float)
-```
-
-### Label Computation
-
-#### Placement Labels (HPWL)
-
-```python
-def compute_hpwl(net, net_pins):
-    """
-    Compute Half-Perimeter Wire Length for a net
-    
-    Formula: HPWL = (x_max - x_min) + (y_max - y_min)
-    
-    Args:
-        net: Net information
-        net_pins: List of pins connected to this net
-    
-    Returns:
-        hpwl: Half-perimeter wire length
-    """
-    if not net_pins:
-        return 0.0
-    
-    x_coords = [pin['x'] for pin in net_pins]
-    y_coords = [pin['y'] for pin in net_pins]
-    
-    hpwl = (max(x_coords) - min(x_coords)) + (max(y_coords) - min(y_coords))
-    return hpwl
-```
-
-#### Routing Labels (Wire Length & Via Count)
-
-```python
-def compute_routing_labels(special_net):
-    """
-    Compute routing labels from special net section
-    
-    Args:
-        special_net: Special net with routing information
-    
-    Returns:
-        wire_length: Total routed wire length
-        via_count: Number of vias used
-    """
-    wire_length = 0.0
-    via_count = 0
-    
-    # Parse routing segments
-    segments = special_net['routing_segments']
-    for seg in segments:
-        # Wire segment: (x1, y1) to (x2, y2)
-        length = abs(seg['x2'] - seg['x1']) + abs(seg['y2'] - seg['y1'])
-        wire_length += length
-        
-        # Count vias (layer changes)
-        via_count += seg.get('via_count', 0)
-    
-    return wire_length, via_count
-```
-
----
-
-## View Construction
-
-### Multi-View Strategy
-
-R2G provides 6 complementary views of circuit graphs to capture different aspects of circuit topology and semantics:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    View Comparison Table                     │
-├─────────────────────────────────────────────────────────────┤
-│ View │ Nodes           │ Edges           │ Best For         │
-├──────┼─────────────────┼─────────────────┼──────────────────┤
-│ (b)  │ All Elements    │ All Connections │ **Overall** ⭐    │
-│ (c)  │ Gates + Nets    │ Gate→Gate       │ Simplified routing│
-│ (d)  │ Gates + IOs     │ Gate↔Gate       │ Gate-level        │
-│ (e)  │ Gates + Nets    │ Gate↔Net        │ Bipartite         │
-│ (f)  │ Gates + Nets    │ Gate↔Net        │ Reduced complex   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### View B: All Elements as Nodes (Recommended)
-
-**Why View B is Best**:
-
-1. **Completeness**: Captures all circuit elements and their relationships
-2. **Rich Features**: Each node type has type-specific features
-3. **Information Parity**: No information loss during graph construction
-4. **Expressiveness**: Handles complex multi-terminal connections
-5. **Performance**: Consistently outperforms other views in experiments
-
-**View B Graph Construction**:
-
-```python
-def build_view_b_graph(components, nets, io_pins, gate_pin_map):
-    """
-    Build View B: All elements as nodes
-    
-    Nodes: Gates + Nets + Pins + IO Pins
-    Edges: Gate-Pin, Pin-Net, Pin-Pin, IO-Pin-...
-    """
-    nodes = []
-    edges = []
-    
-    # Add gates as nodes
-    gate_id_offset = 0
-    for comp in components:
-        nodes.append({
-            'id': gate_id_offset + len(nodes),
-            'type': 0,  # gate
-            'features': compute_gate_features(comp)
-        })
-    
-    # Add nets as nodes
-    net_id_offset = len(nodes)
-    for net in nets:
-        nodes.append({
-            'id': net_id_offset + len(nodes) - net_id_offset,
-            'type': 2,  # net
-            'features': compute_net_features(net)
-        })
-    
-    # Add IO pins as nodes
-    io_id_offset = len(nodes)
-    for io in io_pins:
-        nodes.append({
-            'id': io_id_offset + len(nodes) - io_id_offset,
-            'type': 1,  # io_pin
-            'features': compute_io_features(io)
-        })
-    
-    # Add gate pins as nodes
-    pin_id_offset = len(nodes)
-    for gate_name, pins in gate_pin_map.items():
-        for pin in pins:
-            nodes.append({
-                'id': pin_id_offset + len(nodes) - pin_id_offset,
-                'type': 3,  # pin
-                'features': compute_pin_features(pin)
-            })
-    
-    # Build edges
-    
-    # Gate → Pin edges
-    for gate in components:
-        gate_id = get_gate_id(gate['name'])
-        for pin_name, pin_info in gate_pin_map.get(gate['name'], []):
-            pin_id = get_pin_id(gate['name'], pin_name)
-            edges.append({
-                'src': gate_id,
-                'dst': pin_id,
-                'type': 2,  # gate_pin
-                'features': compute_gate_pin_features(gate, pin_info)
-            })
-    
-    # Pin → Net edges
-    for net in nets:
-        net_id = get_net_id(net['name'])
-        for connection in net['connections']:
-            gate_name, pin_name = parse_connection(connection)
-            pin_id = get_pin_id(gate_name, pin_name)
-            edges.append({
-                'src': pin_id,
-                'dst': net_id,
-                'type': 6,  # pin_net
-                'features': compute_pin_net_features(pin_info, net)
-            })
-    
-    # Pin → Pin edges (via shared net)
-    for net in nets:
-        net_id = get_net_id(net['name'])
-        pins = [get_pin_id(*parse_connection(conn)) for conn in net['connections']]
-        for i in range(len(pins)):
-            for j in range(i+1, len(pins)):
-                edges.append({
-                    'src': pins[i],
-                    'dst': pins[j],
-                    'type': 7,  # pin_pin
-                    'features': compute_pin_pin_features(pins[i], pins[j], net)
-                })
-    
-    # ... other edge types
-    
-    return nodes, edges
-```
-
----
-
-## Graph Merging
-
-### Purpose of Merging
-
-After generating homographs for individual designs, we merge them into a single graph containing all designs. This enables:
-
-1. **Unified dataset**: Single file for all training samples
-2. **Graph-level batching**: PyTorch Geometric can batch multiple graphs
-3. **Cross-design training**: Learn patterns across different designs
-4. **Reproducible splits**: Fixed train/val/test splits based on graph_id
-
-### Merging Process
-
-#### Step 1: Node Merging
-
-```python
-def merge_nodes(homograph_list):
-    """
-    Merge nodes from multiple homographs
-    
-    Args:
-        homograph_list: List of individual homographs
-    
-    Returns:
-        merged_x: Merged node features [N_total, feat_dim]
-        merged_y: Merged node labels [N_total]
-        node_graph_ids: Graph ID for each node [N_total]
-    """
-    merged_x = []
-    merged_y = []
-    node_graph_ids = []
-    
-    node_offset = 0
-    for graph_id, homograph in enumerate(homograph_list):
-        # Add graph_id to node features
-        num_nodes = homograph['x'].shape[0]
-        
-        # Append node features
-        merged_x.append(homograph['x'])
-        
-        # Append node labels
-        merged_y.append(homograph['y'])
-        
-        # Assign graph_id to all nodes
-        graph_ids = torch.full((num_nodes,), graph_id, dtype=torch.long)
-        node_graph_ids.append(graph_ids)
-        
-        node_offset += num_nodes
-    
-    # Concatenate all nodes
-    merged_x = torch.cat(merged_x, dim=0)
-    merged_y = torch.cat(merged_y, dim=0)
-    node_graph_ids = torch.cat(node_graph_ids, dim=0)
-    
-    return merged_x, merged_y, node_graph_ids
-```
-
-#### Step 2: Edge Merging
-
-```python
-def merge_edges(homograph_list, node_offsets):
-    """
-    Merge edges from multiple homographs
-    
-    Args:
-        homograph_list: List of individual homographs
-        node_offsets: Node offset for each graph
-    
-    Returns:
-        merged_edge_index: Merged edge indices [2, E_total]
-        merged_edge_attr: Merged edge features [E_total, feat_dim]
-        merged_edge_labels: Merged edge labels [E_total]
-    """
-    merged_edge_index = []
-    merged_edge_attr = []
-    merged_edge_labels = []
-    
-    for i, homograph in enumerate(homograph_list):
-        # Get edge index and apply offset
-        edge_index = homograph['edge_index'] + node_offsets[i]
-        
-        # Append edge index
-        merged_edge_index.append(edge_index)
-        
-        # Append edge features
-        if 'edge_attr' in homograph:
-            merged_edge_attr.append(homograph['edge_attr'])
-        
-        # Append edge labels
-        if 'edge_label' in homograph:
-            merged_edge_labels.append(homograph['edge_label'])
-    
-    # Concatenate all edges
-    merged_edge_index = torch.cat(merged_edge_index, dim=1)
-    merged_edge_attr = torch.cat(merged_edge_attr, dim=0) if merged_edge_attr else None
-    merged_edge_labels = torch.cat(merged_edge_labels, dim=0) if merged_edge_labels else None
-    
-    return merged_edge_index, merged_edge_attr, merged_edge_labels
-```
-
-#### Step 3: Global Features Merging
-
-```python
-def merge_global_features(homograph_list):
-    """
-    Merge global features from multiple homographs
-    
-    Returns:
-        global_features: Tensor[G, 6] - Global features per graph
-        global_y: Tensor[G, 4] - Global labels per graph
-        die_coordinates: Tensor[G, 2, 2] - Die bounds
-    """
-    global_features = []
-    global_y = []
-    die_coordinates = []
-    
-    for homograph in homograph_list:
-        # Extract global features
-        global_features.append(homograph['global_features'])
-        
-        # Extract global labels
-        global_y.append(homograph['global_y'])
-        
-        # Extract die coordinates
-        die_coordinates.append(homograph['die_coordinates'])
-    
-    # Stack global features
-    global_features = torch.stack(global_features, dim=0)
-    global_y = torch.stack(global_y, dim=0)
-    die_coordinates = torch.stack(die_coordinates, dim=0)
-    
-    return global_features, global_y, die_coordinates
-```
-
-### Complete Merging Pipeline
-
-```python
-def merge_homographs(input_dir, output_file):
-    """
-    Complete pipeline for merging homographs
-    
-    Args:
-        input_dir: Directory containing individual homographs
-        output_file: Output file path for merged homograph
-    """
-    # Load all homographs
-    homograph_files = list(Path(input_dir).glob('*_homograph.pt'))
-    homograph_list = []
-    
-    for file in sorted(homograph_files):
-        homograph = torch.load(file)
-        homograph_list.append(homograph)
-    
-    # Compute node offsets
-    node_offsets = []
-    offset = 0
-    for homograph in homograph_list:
-        node_offsets.append(offset)
-        offset += homograph['x'].shape[0]
-    
-    # Merge nodes
-    merged_x, merged_y, node_graph_ids = merge_nodes(homograph_list)
-    
-    # Merge edges
-    merged_edge_index, merged_edge_attr, merged_edge_labels = merge_edges(
-        homograph_list, node_offsets
-    )
-    
-    # Merge global features
-    global_features, global_y, die_coordinates = merge_global_features(homograph_list)
-    
-    # Create merged homograph
-    merged_homograph = {
-        'x': merged_x,
-        'y': merged_y,
-        'edge_index': merged_edge_index,
-        'edge_attr': merged_edge_attr,
-        'edge_label': merged_edge_labels,
-        'global_features': global_features,
-        'global_y': global_y,
-        'die_coordinates': die_coordinates,
-        'num_graphs': len(homograph_list)
-    }
-    
-    # Save merged homograph
-    torch.save(merged_homograph, output_file)
-    
-    print(f"Merged {len(homograph_list)} graphs into {output_file}")
-```
-
----
-
-## Data Export
-
-### Export Format
-
-Merged homographs are saved in PyTorch format (.pt) compatible with PyTorch Geometric:
-
-```python
-import torch
-from torch_geometric.data import Data, HeteroData
-
-# Load merged homograph
-merged_data = torch.load('data/merged/place_B_homograph.pt')
-
-# Convert to PyG Data object
-pyg_data = Data(
-    x=merged_data['x'],                    # Node features
-    y=merged_data['y'],                    # Node labels
-    edge_index=merged_data['edge_index'],  # Edge indices
-    edge_attr=merged_data['edge_attr'],    # Edge features
-    global_features=merged_data['global_features'],
-    global_y=merged_data['global_y'],
-    die_coordinates=merged_data['die_coordinates']
-)
-
-# Or convert to HeteroData (for typed graphs)
-hetero_data = HeteroData()
-hetero_data['gate'].x = merged_data['x'][merged_data['node_type'] == 0]
-hetero_data['net'].x = merged_data['x'][merged_data['node_type'] == 2]
-hetero_data['gate', 'connects', 'net'].edge_index = ...
-```
-
-### Data Validation
-
-```python
-def validate_merged_homograph(merged_data):
-    """
-    Validate merged homograph structure and consistency
-    
-    Checks:
-    - Node feature dimensions
-    - Edge feature dimensions
-    - Label coverage
-    - Graph connectivity
-    - Global feature consistency
-    """
-    print("=== Validating Merged Homograph ===")
-    
-    # Check node features
-    assert merged_data['x'].dim() == 2, "Node features must be 2D"
-    assert merged_data['x'].shape[1] == 10, "Node features must have 10 dimensions"
-    print(f"✓ Node features: {merged_data['x'].shape}")
-    
-    # Check edge features
-    assert merged_data['edge_index'].dim() == 2, "Edge indices must be 2D"
-    assert merged_data['edge_index'].shape[0] == 2, "Edge indices must be [2, E]"
-    print(f"✓ Edge indices: {merged_data['edge_index'].shape}")
-    
-    # Check labels
-    num_valid_labels = (merged_data['y'] != -1).sum().item()
-    total_labels = merged_data['y'].numel()
-    label_coverage = num_valid_labels / total_labels
-    print(f"✓ Label coverage: {label_coverage:.2%} ({num_valid_labels}/{total_labels})")
-    
-    # Check global features
-    assert merged_data['global_features'].shape[1] == 6, "Global features must have 6 dimensions"
-    print(f"✓ Global features: {merged_data['global_features'].shape}")
-    
-    # Check graph IDs
-    num_graphs = merged_data['global_features'].shape[0]
-    print(f"✓ Number of graphs: {num_graphs}")
-    
-    print("=== Validation Complete ===")
-```
-
----
-
-## Troubleshooting
-
-### Common Issues
-
-#### Issue 1: DEF File Not Found
-
-**Symptoms**:
-
-```
-FileNotFoundError: floorplan.def not found
-```
-
-**Causes**:
-
-1. Wrong directory structure
-2. DEF file has different name
-3. Case sensitivity issues
-
-**Solutions**:
+**Edge-Level Task Example (Routing Wire Length Prediction)**
 
 ```bash
-# Check directory structure
-ls -la data/raw_def/
+cd gnn-edge
 
-# Find DEF files
-find data/raw_def/ -name "*.def"
-
-# Verify file naming
-ls data/raw_def/<design_name>/floorplan.def
+# Best configuration (R² > 0.99)
+python main.py \
+    --dataset route_E_homograph \
+    --task_level edge \
+    --task regression \
+    --model gat \
+    --num_gnn_layers 3 \
+    --num_head_layers 4 \
+    --hid_dim 256 \
+    --lr 0.0001 \
+    --epochs 100 \
+    --gpu 0
 ```
 
-#### Issue 2: Memory Error During Merging
+**Available Models**:
+- `gine` - Graph Isomorphism Network (best overall performance on View B)
+- `resgatedgcn` - Residual Gated Graph Convolution (most stable across views)
+- `gat` - Graph Attention Network (excels on View E)
 
-**Symptoms**:
+### 3. Results Analysis
+
+After training completes, results are saved to:
 
 ```
-RuntimeError: CUDA out of memory
+results/<dataset>_<model>_head<hid>_hid<hidden>_layers<layers>_scheduler<scheduler>/
+├── train.log                    # Full training log
+├── best_model.pt                # Best model weights
+├── test_results.npz             # Test predictions & labels
+├── train_eval.npz              # Train evaluation
+├── val_eval.npz                # Validation evaluation
+├── label_distribution.png     # Label distribution plots
+└── plots_*/                     # Scatter plots
+    ├── train_scatter.png
+    ├── val_scatter.png
+    └── test_scatter.png
 ```
 
-**Causes**:
-
-1. Too many graphs merged at once
-2. Graph size too large
-
-**Solutions**:
+To load and analyze results:
 
 ```python
-# Merge graphs in batches
-def batch_merge(homograph_list, batch_size=10):
-    merged_list = []
-    for i in range(0, len(homograph_list), batch_size):
-        batch = homograph_list[i:i+batch_size]
-        merged = merge_homographs_batch(batch)
-        merged_list.append(merged)
-    return merge_homographs_batch(merged_list)
-```
+import numpy as np
+import matplotlib.pyplot as plt
 
-#### Issue 3: Feature Dimension Mismatch
+# Load test results
+data = np.load('results/.../test_results.npz')
+preds = data['preds']
+labels = data['labels']
 
-**Symptoms**:
+# Compute metrics
+mae = np.mean(np.abs(labels - preds))
+rmse = np.sqrt(np.mean((labels - preds) ** 2))
+r2 = 1 - np.sum((labels - preds) ** 2) / np.sum((labels - labels.mean()) ** 2)
 
-```
-AssertionError: Node features must have 10 dimensions
-```
-
-**Causes**:
-
-1. Feature computation inconsistency
-2. Different views mixed
-
-**Solutions**:
-
-```python
-# Check feature dimensions before merging
-for homograph in homograph_list:
-    print(f"Graph: {homograph['name']}")
-    print(f"  Node features: {homograph['x'].shape}")
-    print(f"  Edge features: {homograph['edge_attr'].shape if 'edge_attr' in homograph else 'N/A'}")
-```
-
-#### Issue 4: Label Missing
-
-**Symptoms**:
-
-```
-Warning: Label coverage: 0.00% (0/1000)
-```
-
-**Causes**:
-
-1. Labels not computed correctly
-2. Invalid label values
-
-**Solutions**:
-
-```python
-# Check label computation
-if 'y' not in homograph or homograph['y'] is None:
-    print(f"Error: Labels not found in {homograph['name']}")
-else:
-    print(f"Label stats: min={homograph['y'].min()}, max={homograph['y'].max()}")
+print(f"MAE: {mae:.4f}, RMSE: {rmse:.4f}, R²: {r2:.4f}")
 ```
 
 ---
 
-## Advanced Usage
+## Project Structure
 
-### Custom Views
-
-To add a new view:
-
-1. Create new generator file:
-
-```python
-# data_pipeline/heterograph_generation/placement_v1.4/G_heterograph_generator.py
-
-def build_view_g_graph(components, nets, io_pins):
-    """Build custom View G"""
-    # Your custom graph construction logic
-    pass
 ```
-
-2. Integrate into pipeline:
-
-```bash
-python data_pipeline/heterograph_generation/placement_v1.4/G_heterograph_generator.py \
-    --input_dir data_sources/placement_def \
-    --output_dir data/heterographs/place
-```
-
-### Parallel Processing
-
-Speed up processing with multiprocessing:
-
-```python
-from multiprocessing import Pool
-
-def process_design(args):
-    """Process single design"""
-    design_name, input_dir, output_dir = args
-    # ... processing logic
-    return result
-
-def parallel_process(designs, num_workers=4):
-    """Process multiple designs in parallel"""
-    with Pool(num_workers) as pool:
-        results = pool.map(process_design, designs)
-    return results
-```
-
-### Incremental Updates
-
-Update dataset with new designs without reprocessing all:
-
-```python
-def incremental_merge(existing_merged_file, new_homograph_dir, output_file):
-    """Merge new designs into existing dataset"""
-    # Load existing merged dataset
-    existing = torch.load(existing_merged_file)
-    
-    # Load new homographs
-    new_list = []
-    for file in Path(new_homograph_dir).glob('*_homograph.pt'):
-        new_list.append(torch.load(file))
-    
-    # Merge
-    merged = merge_homographs(existing, new_list)
-    torch.save(merged, output_file)
+R2G/
+├── README.md                       # This file
+├── LICENSE                         # MIT License
+├── requirements.txt                # Python dependencies
+├── EDA_Data_Extractor.py          # EDA data extraction tool
+├── figs/                          # Figures and diagrams
+│   ├── prefect_intro.png          # Dataset evolution diagram
+│   └── pipeline_overview.png      # Data generation pipeline
+├── data_pipeline/                  # Data generation pipeline
+│   ├── heterograph_generation/     # Heterograph generation (Views B-F)
+│   │   ├── placement_v1.4/        # Placement heterographs
+│   │   │   ├── B_heterograph_generator.py
+│   │   │   ├── C_heterograph_generator.py
+│   │   │   ├── D_heterograph_generator.py
+│   │   │   ├── E_heterograph_generator.py
+│   │   │   └── F_heterograph_generator.py
+│   │   └── routing_v1.3/         # Routing heterographs
+│   │       ├── RB_heterograph_generator.py
+│   │       ├── RC_heterograph_generator.py
+│   │       ├── RD_heterograph_generator.py
+│   │       ├── RE_heterograph_generator.py
+│   │       └── RF_heterograph_generator.py
+│   ├── homograph_conversion/      # Heterograph → Homograph conversion
+│   │   ├── placement_v1.4/
+│   │   │   └── place_hetero_to_homo_converter.py
+│   │   └── routing_v1.3/
+│   │       └── route_hetero_to_homo_converter.py
+│   ├── graph_validation/          # Graph quality checks
+│   │   ├── check_heterograph.py   # Validate heterographs
+│   │   ├── check_homographs.py    # Validate homographs
+│   │   └── compare_graphs.py      # Compare graph views
+│   └── graph_merging/             # Graph merging across designs
+│       ├── placement_homo/
+│       │   ├── instruction.txt               # Usage instructions
+│       │   ├── node_merge_homographs.py
+│       │   └── edge_merge_homographs.py
+│       └── routing_homo/
+│           ├── instruction.txt
+│           ├── node_merge_homographs.py
+│           └── edge_merge_homographs.py
+├── data_sources/                  # Raw data sources
+│   ├── placement_def/            # Placement DEF files
+│   └── routing_def/              # Routing DEF files
+├── gnn-node/                     # Node-level task training
+│   ├── main.py                   # Entry point (task_level=node)
+│   ├── model.py                  # GNN models
+│   ├── dataset.py                # Data loading
+│   ├── encoders.py               # Feature encoding
+│   ├── sampling.py               # Neighbor sampling
+│   └── downstream_train.py       # Training loop
+└── gnn-edge/                     # Edge-level task training
+    ├── main.py                   # Entry point (task_level=edge)
+    ├── model.py
+    ├── dataset.py
+    ├── encoders.py
+    ├── sampling.py
+    └── downstream_train.py       # Training loop
 ```
 
 ---
 
-## Summary
+## Data Generation Pipeline
 
-### Key Takeaways
+![R2G pipeline overview](figs/pipeline_overview.png)
 
-1. **View B is recommended**: Best overall performance for both placement and routing
-2. **Pipeline is modular**: Each stage can be run independently
-3. **Merging enables efficient training**: Single file for all designs
-4. **Features are type-specific**: Different node/edge types have different features
-5. **Labels are task-dependent**: HPWL for placement, wire_length/via_count for routing
+The data generation pipeline converts DEF files into multi-view circuit graphs through a four-stage process:
 
-### Pipeline Summary
+### Pipeline Overview
 
-| Stage           | Input          | Output         | Key Files                       |
-| --------------- | -------------- | -------------- | ------------------------------- |
-| DEF Parsing     | floorplan.def  | Parsed data    | `parse_def.py`                  |
-| Heterograph Gen | Parsed data    | heterograph.pt | `*_heterograph_generator.py`    |
-| Homograph Conv  | heterograph.pt | homograph.pt   | `*_hetero_to_homo_converter.py` |
-| Graph Merging   | homograph.pt   | merged.pt      | `node_merge_homographs.py`      |
+```
+DEF Files (OpenROAD)
+        │
+        ├─ design1/floorplan.def
+        ├─ design2/floorplan.def
+        └─ design3/floorplan.def
+        │
+        ↓ (Heterograph Generation)
+        │
+   Heterographs (Typed)
+        │
+        ├─ design1_B_heterograph.pt  ──┐
+        ├─ design2_B_heterograph.pt  ──┼─ View B (Recommended)
+        ├─ design3_B_heterograph.pt  ──┘
+        │
+        ↓ (Homograph Conversion)
+        │
+   Homographs (Unified)
+        │
+        ├─ design1_B_homograph.pt
+        ├─ design2_B_homograph.pt
+        └─ design3_B_homograph.pt
+        │
+        ↓ (Graph Merging)
+        │
+   Merged Dataset
+        │
+        └─ place_B_homograph.pt  (Ready for training)
+```
 
-### Quick Reference
+### Multi-View Graph Representations
 
-```bash
-# Complete pipeline for placement view B
-python data_pipeline/heterograph_generation/placement_v1.4/B_heterograph_generator.py \
-    --input_dir data_sources/placement_def --output_dir data/heterographs/place
+R2G provides 5 complementary views of circuit graphs:
 
-python data_pipeline/homograph_conversion/placement_v1.4/place_hetero_to_homo_converter.py \
-    --input_dir data/heterographs/place --output_dir data/homographs/place
+| View | Nodes | Edges | Best For |
+|------|-------|-------|----------|
+| **(b)** All Elements as Nodes | Gates + Nets + Pins + IOs | All Connections | **Overall Performance** |
+| **(c)** Pins as Edges | Gates + Nets + IOs | Gate-Net (pins as edges) | Signal-aware learning |
+| **(d)** Nets as Edges | Gates + IOs | Gate↔Gate (nets as edges) | Pairwise connectivity |
+| **(e)** Net-Gate Incidence | Gates + Nets | Gate↔Net (incidence edges) | Bipartite formulation |
+| **(f)** Nets Without Pins | Gates + Nets + IOs | Gate↔Net (pruned pins) | Scalability |
 
-python data_pipeline/graph_merging/placement_homo/node_merge_homographs.py \
-    --input_dir data/homographs/place --output_file data/merged/place_B_homograph.pt
+**Recommendation**: View (b) achieves the best overall performance for both placement and routing tasks.
 
-python data_pipeline/graph_merging/placement_homo/edge_merge_homographs.py \
-    --input_dir data/homographs/place --output_file data/merged/place_B_homograph.pt
+### Node Types & Features
+
+| Type | ID | Features |
+|------|----|----------|
+| gate | 0 | x, y, cell_type, orientation, area, place_flag, power_leak |
+| io_pin | 1 | x, y, io_x, io_y |
+| net | 2 | net_type, pin_count |
+| pin | 3 | x, y, pin_type, owning_gate_type |
+
+### Labels
+
+**Placement Labels (HPWL Prediction)**:
+- Target: HPWL (Half-Perimeter Wire Length)
+- Formula: `HPWL = (x_max - x_min) + (y_max - y_min)`
+- Computed from: Minimal bounding box over a net's pins
+- Stored in: Node labels for net nodes (views b/c) or edge labels (views d-f)
+
+**Routing Labels (Wire Length & Via Count)**:
+- Target 1: wire_length (Total routed wire length)
+- Formula: `wire_length = Σ_ℓ Σ_(x1,y1),(x2,y2)∈ℓ |x2-x1| + |y2-y1|`
+- Target 2: via_count (Number of vias used)
+- Computed from: DEF routed geometry per metal layer
+- Stored in: Node labels for net nodes (views b/c) or edge labels (views d-f)
+
+---
+
+## Training & Evaluation
+
+### Training Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Training Pipeline                        │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│  1. Data Loading & Preprocessing                           │
+│     ├─ Load .pt files                                       │
+│     ├─ Split train/val/test by graph_id                    │
+│     ├─ Normalize labels (log + z-score)                   │
+│     ├─ Concatenate global features                         │
+│     └─ Create valid_mask                                    │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│  2. Feature Encoding                                        │
+│     └─ Discrete → Embedding, Continuous → Linear            │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│  3. GNN Message Passing (3-4 layers)                        │
+│     ├─ GINE: MLP-based aggregation                          │
+│     ├─ ResGatedGCN: Gated residual connections             │
+│     └─ GAT: Attention-weighted aggregation                  │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│  4. Task-Specific Head (3-4 layers)                         │
+│     ├─ Node: head(node_embedding)                           │
+│     └─ Edge: agg(src,dst,edge) → head()                     │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│  5. Training & Evaluation                                   │
+│     ├─ SmoothL1Loss (regression)                           │
+│     ├─ Learning rate scheduling                             │
+│     └─ MAE, RMSE, R² metrics                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Supported GNN Models
+
+| Model | Mechanism | Best View | Characteristics |
+|-------|-----------|-----------|-----------------|
+| **GINE** | MLP-based aggregation with edge features | View (b) | Theoretically optimal for isomorphism tasks |
+| **ResGatedGCN** | Residual gated graph convolutions | View (b,c) | Most stable across views, preserves geometric coupling |
+| **GAT** | Attention-weighted aggregation | View (e) | Excels on incidence-edge neighborhoods with rich local connectivity |
+
+### Evaluation Metrics
+
+**Regression** (Placement/Routing):
+- **MAE** (Mean Absolute Error): `mean(|y_true - y_pred|)`
+- **RMSE** (Root Mean Squared Error): `sqrt(mean((y_true - y_pred)²))`
+- **R²** (Coefficient of Determination): `1 - SS_res / SS_tot`
+
+---
+
+## Citation
+
+If you use R2G in your research, please cite:
+
+```bibtex
+@inproceedings{r2g2026,
+  title={R2G: A Multi-View Circuit Graph Benchmark Suite from RTL to GDSII},
+  author={First Author and Second Author},
+  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+  year={2026}
+}
 ```
 
 ---
 
-## References
+## Acknowledgments
 
-### Paper
-
-- **R2G: A Multi-View Circuit Graph Benchmark Suite from RTL to GDSII**
-- CVPR 2026
-- Authors: [Paper Author List]
-
-### Related Work
-
-- **OpenROAD**: Open-source physical design flow
-- **DEF Format**: Design Exchange Format specification
-- **PyTorch Geometric**: Graph neural network library
-
-### Code Dependencies
-
-- **PyTorch**: Deep learning framework
-- **NumPy**: Numerical computing
-- **Pandas**: Data manipulation
-- **tqdm**: Progress bars
+- **OpenROAD** for providing the open-source physical design flow
+- **PyTorch Geometric** for the graph neural network framework
+- **Open Graph Benchmark (OGB)** for inspiring the benchmark design
+- **TUDataset** for consolidated graph collections best practices
 
 ---
 
-**End of Data Generation Guide**
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## Future Development
+
+Planned enhancements include:
+- Expanded designs and technology coverage
+- Timing- and congestion-aware tasks with richer LEF/STA/PDN attributes
+- Exploration of deeper GNNs, transformers, and MoE architectures
+- Cross-design and cross-node generalization studies
+- Stronger standardized evaluation for EDA
+
+---
+
+## Contributing
+
+Contributions are welcome! Please feel free to open issues and pull requests.
